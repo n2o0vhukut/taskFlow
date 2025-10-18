@@ -1,108 +1,168 @@
 from __future__ import annotations
-import typer, sqlite3, datetime as dt
-from rich.console import Console
-from rich.table import Table
-from .db import get_conn, init_db as _init_db
-from .utils import score_task
 
-app = typer.Typer(help="TaskFlow Ops - 日次チェックインと自動計画")
+import argparse
+import sys
+from typing import List, Optional
 
-@app.command()
-def init_db():
-    _init_db()
-    typer.echo("DB initialized.")
+from .db import init_db, SessionLocal
+from .services.tasks import (
+    add_task,
+    list_tasks,
+    mark_done,
+    remove_task,
+    export_tasks_csv,
+)
+from .api import create_app
 
-@app.command()
-def add(title: str = typer.Option(..., help="タスク名"),
-        project: str = typer.Option(None, help="プロジェクト名"),
-        priority: str = typer.Option("M", help="優先度 H/M/L"),
-        est: float = typer.Option(1.0, help="推定工数（h）"),
-        due: str = typer.Option(None, help="期限 YYYY-MM-DD")):
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute("INSERT INTO tasks(title,project,priority,est_hours,due) VALUES(?,?,?,?,?)",
-                (title, project, priority, est, due))
-    conn.commit()
-    tid = cur.lastrowid
-    cur.execute("INSERT INTO events(task_id,kind,message) VALUES(?,?,?)", (tid,"add",f"add:{title}"))
-    conn.commit(); conn.close()
-    typer.echo(f"Added task #{tid}: {title}")
 
-@app.command()
-def list(status: str = typer.Option("todo", help="todo/doing/done/all"), limit: int = 50):
-    conn = get_conn(); cur = conn.cursor()
-    q = "SELECT * FROM tasks" + ("" if status=="all" else " WHERE status=?")
-    rows = cur.execute(q, (status,) if status!="all" else ()).fetchall()
-    conn.close()
-    scored = [(score_task(r["priority"], r["due"], r["est_hours"]), r) for r in rows]
-    scored.sort(key=lambda x: x[0], reverse=True)
-    table = Table(title="Tasks")
-    for c in ["id","title","project","priority","est_hours","due","status","score"]:
-        table.add_column(c)
-    for s,r in scored[:limit]:
-        table.add_row(str(r["id"]), r["title"], r["project"] or "", r["priority"],
-                      f'{r["est_hours"]:.1f}', str(r["due"] or ""), r["status"], f"{s:.2f}")
-    Console().print(table)
+def _render_table(headers, rows) -> None:
+    widths = [len(h) for h in headers]
+    for r in rows:
+        for i, cell in enumerate(r):
+            widths[i] = max(widths[i], len(str(cell)))
+    def fmt_row(values):
+        return " ".join(str(v).ljust(widths[i]) for i, v in enumerate(values))
+    print(fmt_row(headers))
+    print(" ".join("-" * w for w in widths))
+    for r in rows:
+        print(fmt_row(r))
 
-@app.command()
-def done(task_id: int):
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute("UPDATE tasks SET status='done', updated_at=CURRENT_TIMESTAMP WHERE id=?", (task_id,))
-    cur.execute("INSERT INTO events(task_id,kind,message) VALUES(?,?,?)", (task_id,"done","completed"))
-    conn.commit(); conn.close()
-    typer.echo(f"Task #{task_id} done.")
 
-@app.command()
-def checkin(auto: bool = typer.Option(False, help="対話をスキップして記録のみ")):
-    date = dt.date.today().isoformat()
-    if auto:
-        avail = None; notes = ""
-    else:
-        avail = typer.prompt("今日の可処分時間（h）", default="3")
-        notes = typer.prompt("今日のメモ", default="")
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute("INSERT INTO checkins(date,available_hours,notes) VALUES(?,?,?)",
-                (date, float(avail) if avail else None, notes))
-    conn.commit(); conn.close()
-    typer.echo(f"Checked in: {date}")
+def cmd_init_db(args) -> int:
+    init_db()
+    print("DB initialized.")
+    return 0
 
-@app.command()
-def plan_today(hours: float = 3.0):
-    conn = get_conn(); cur = conn.cursor()
-    rows = cur.execute("SELECT * FROM tasks WHERE status='todo'").fetchall()
-    conn.close()
-    scored = [(score_task(r["priority"], r["due"], r["est_hours"]), r) for r in rows]
-    scored.sort(key=lambda x: x[0], reverse=True)
-    remaining = hours; plan = []
-    for s,r in scored:
-        if remaining <= 0: break
-        dur = min(remaining, max(0.5, min(r["est_hours"], 2.0)))
-        plan.append((r, s, dur)); remaining -= dur
 
-    table = Table(title=f"今日のプラン（{hours}h）")
-    for c in ["順","task_id","タイトル","時間(h)","スコア"]:
-        table.add_column(c)
-    for i,(r,s,d) in enumerate(plan,1):
-        table.add_row(str(i), str(r["id"]), r["title"], f"{d:.2f}", f"{s:.2f}")
-    Console().print(table)
+def cmd_add(args) -> int:
+    with SessionLocal() as s:
+        t = add_task(
+            s,
+            title=args.title,
+            project=args.project,
+            priority=args.priority,
+            estimate_hours=args.est,
+            due_date=args.due,
+        )
+        print(f"Added task #{t.id}: {t.title}")
+    return 0
 
-@app.command()
-def weekly_report(out: str = "data/weekly.xlsx"):
-    import pandas as pd
-    from pathlib import Path
-    conn = get_conn()
-    tasks = pd.read_sql_query("SELECT * FROM tasks", conn)
-    events = pd.read_sql_query("SELECT * FROM events", conn)
-    checkins = pd.read_sql_query("SELECT * FROM checkins", conn)
-    conn.close()
-    Path(out).parent.mkdir(parents=True, exist_ok=True)
-    with pd.ExcelWriter(out, engine="openpyxl") as w:
-        tasks.to_excel(w, index=False, sheet_name="tasks")
-        events.to_excel(w, index=False, sheet_name="events")
-        checkins.to_excel(w, index=False, sheet_name="checkins")
-    typer.echo(f"Wrote: {out}")
 
-def main():
-    app()
+def cmd_list(args) -> int:
+    with SessionLocal() as s:
+        items = list_tasks(
+            s, status=args.status, project=args.project, due_before=args.due_before
+        )
+        rows = [
+            [
+                t.id,
+                t.title,
+                t.project or "",
+                t.priority,
+                f"{t.estimate_hours:.1f}" if t.estimate_hours is not None else "",
+                t.due_date.isoformat() if t.due_date else "",
+                t.status,
+            ]
+            for t in items
+        ]
+        _render_table(
+            ["id", "title", "project", "priority", "est", "due", "status"], rows
+        )
+    return 0
 
-if __name__ == "__main__":
-    main()
+
+def cmd_done(args) -> int:
+    with SessionLocal() as s:
+        try:
+            t = mark_done(s, args.task_id)
+        except ValueError:
+            print("Task not found", file=sys.stderr)
+            return 1
+        print(f"Task #{t.id} done.")
+    return 0
+
+
+def cmd_rm(args) -> int:
+    with SessionLocal() as s:
+        try:
+            remove_task(s, args.task_id)
+        except ValueError:
+            print("Task not found", file=sys.stderr)
+            return 1
+        print(f"Task #{args.task_id} removed.")
+    return 0
+
+
+def cmd_export(args) -> int:
+    if args.format != "csv":
+        print("Only csv is supported in P0", file=sys.stderr)
+        return 2
+    with SessionLocal() as s:
+        items = list_tasks(s, status=args.status, project=args.project)
+        path = export_tasks_csv(items, args.out)
+        print(f"Exported: {path}")
+    return 0
+
+
+def cmd_api(args) -> int:
+    app = create_app()
+    app.run(host=args.host, port=args.port, debug=args.debug)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="taskflow", description="TaskFlow CLI")
+    sub = p.add_subparsers(dest="cmd")
+
+    sp = sub.add_parser("init-db", help="Initialize database")
+    sp.set_defaults(func=cmd_init_db)
+
+    sp = sub.add_parser("add", help="Add a task")
+    sp.add_argument("--title", required=True)
+    sp.add_argument("--project", default=None)
+    sp.add_argument("--priority", default="M", choices=["H", "M", "L"]) 
+    sp.add_argument("--est", type=float, default=None, help="estimate hours")
+    sp.add_argument("--due", default=None, help="YYYY-MM-DD")
+    sp.set_defaults(func=cmd_add)
+
+    sp = sub.add_parser("list", help="List tasks")
+    sp.add_argument("--status", default="todo", choices=["todo", "doing", "done", "all"]) 
+    sp.add_argument("--project", default=None)
+    sp.add_argument("--due-before", dest="due_before", default=None)
+    sp.set_defaults(func=cmd_list)
+
+    sp = sub.add_parser("done", help="Mark task done")
+    sp.add_argument("task_id", type=int)
+    sp.set_defaults(func=cmd_done)
+
+    sp = sub.add_parser("rm", help="Remove task")
+    sp.add_argument("task_id", type=int)
+    sp.set_defaults(func=cmd_rm)
+
+    sp = sub.add_parser("export", help="Export tasks")
+    sp.add_argument("--format", default="csv")
+    sp.add_argument("--out", required=True)
+    sp.add_argument("--status", default="all", choices=["todo", "doing", "done", "all"]) 
+    sp.add_argument("--project", default=None)
+    sp.set_defaults(func=cmd_export)
+
+    sp = sub.add_parser("api", help="Run Flask API server")
+    sp.add_argument("--host", default="127.0.0.1")
+    sp.add_argument("--port", type=int, default=5000)
+    sp.add_argument("--debug", action="store_true")
+    sp.set_defaults(func=cmd_api)
+
+    return p
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not hasattr(args, "func"):
+        parser.print_help()
+        return 0
+    return args.func(args)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
