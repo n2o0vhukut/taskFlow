@@ -1,5 +1,21 @@
 from __future__ import annotations
 
+"""API ルート群（Blueprint）。
+
+提供エンドポイント（P0）:
+- GET    /tasks                タスク一覧（クエリ: status, project, due_before）
+- POST   /tasks                タスク作成（JSON: title, project?, priority?, estimate_hours?, due_date?）
+- GET    /tasks/<id>           タスク単体取得
+- PATCH  /tasks/<id>           タスク更新（部分更新）
+- DELETE /tasks/<id>           タスク削除
+- POST   /search               簡易検索（JSON: q）
+- POST   /webhooks/events      受信イベントをファイルへ追記
+- POST   /chat/completions     ダミーのチャット応答（echo）
+
+各ハンドラは必要な範囲で `SessionLocal` を `with` 文で開き、サービス層へ委譲します。
+エラー応答は `{ "error": <message> }` のJSONにHTTPステータスを付与します。
+"""
+
 from datetime import datetime
 import json
 from pathlib import Path
@@ -23,11 +39,13 @@ bp = Blueprint("api", __name__)
 
 
 def _json_error(code: int, message: str):
+    """エラーメッセージをJSONで返す簡易ヘルパ。"""
     return jsonify({"error": message}), code
 
 
 @bp.get("/tasks")
 def get_tasks():  # type: ignore
+    """タスク一覧を返す。クエリで `status`/`project`/`due_before` を受け取る。"""
     status = request.args.get("status")
     project = request.args.get("project")
     due_before = request.args.get("due_before")
@@ -38,6 +56,7 @@ def get_tasks():  # type: ignore
 
 @bp.post("/tasks")
 def create_task():  # type: ignore
+    """タスクを作成する。`title` は必須、その他は任意。201を返す。"""
     data = request.get_json(silent=True) or {}
     title = data.get("title")
     if not title:
@@ -56,6 +75,7 @@ def create_task():  # type: ignore
 
 @bp.get("/tasks/<int:task_id>")
 def get_task_by_id(task_id: int):  # type: ignore
+    """指定IDのタスクを返す。見つからなければ 404。"""
     with SessionLocal() as s:
         t = get_task(s, task_id)
         if not t:
@@ -65,6 +85,7 @@ def get_task_by_id(task_id: int):  # type: ignore
 
 @bp.patch("/tasks/<int:task_id>")
 def patch_task(task_id: int):  # type: ignore
+    """指定IDのタスクを部分更新する。見つからなければ 404。"""
     data = request.get_json(silent=True) or {}
     with SessionLocal() as s:
         try:
@@ -76,6 +97,7 @@ def patch_task(task_id: int):  # type: ignore
 
 @bp.delete("/tasks/<int:task_id>")
 def delete_task(task_id: int):  # type: ignore
+    """指定IDのタスクを削除。成功時は204、見つからなければ404。"""
     with SessionLocal() as s:
         try:
             remove_task(s, task_id)
@@ -86,6 +108,7 @@ def delete_task(task_id: int):  # type: ignore
 
 @bp.post("/search")
 def search():  # type: ignore
+    """`q` を含む title/project を部分一致検索する。"""
     data = request.get_json(silent=True) or {}
     q = data.get("q")
     if not q:
@@ -97,6 +120,7 @@ def search():  # type: ignore
 
 @bp.post("/webhooks/events")
 def webhooks_events():  # type: ignore
+    """受け取ったペイロードを `data/webhooks_events.log` に1行JSONで追記する。"""
     payload = request.get_json(silent=True) or {}
     # Append to simple log file in data/
     try:
@@ -110,12 +134,13 @@ def webhooks_events():  # type: ignore
         with log_file.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
+        # ログ書き込み失敗は無視（受領は常に200で応答）
         pass
     return jsonify({"status": "received"})
 
 
 @bp.post("/chat/completions")
 def chat_completions():  # type: ignore
+    """ダミーのチャット完了API。直近ユーザの内容を echo する。"""
     data = request.get_json(silent=True) or {}
     return jsonify(echo_completion(data))
-
