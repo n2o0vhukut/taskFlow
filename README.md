@@ -55,3 +55,6 @@ pytest -q
 
 ## メモ
 - P0は最小構成です。P1でAlembic, 認証, バリデーション, Lint/CI等を拡充します。
+
+## 詳細設計
+- アーキテクチャの骨子と拡張方針は `docs/ARCHITECTURE.md` を参照してください。
