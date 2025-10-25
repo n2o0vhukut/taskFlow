@@ -13,3 +13,4 @@ data/*.log
 .env
 *.env
 slack_bot/.env
+grok/
