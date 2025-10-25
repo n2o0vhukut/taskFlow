@@ -9,15 +9,19 @@ Quick start
    python -m venv .venv && source .venv/bin/activate
    pip install -r slack_bot/requirements.txt
 
-2) Environment
+2) Environment (.env supported)
 
-   export SLACK_BOT_TOKEN=xoxb-...
-   export SLACK_SIGNING_SECRET=...
-   export TASKFLOW_API_BASE_URL="http://127.0.0.1:8000/v1"
-   export TASKFLOW_API_TOKEN=secret
-   export DAILY_USER_IDS=UXXXXXXXX,UYYYYYYYY
-   export USER_MAP_JSON='{"UXXXXXXXX":"masato"}'
-   export PORT=3000
+   # Create a dotenv file (recommended; not committed)
+   cp slack_bot/.env.example slack_bot/.env
+   # Edit slack_bot/.env and set values, e.g.:
+   # SLACK_BOT_TOKEN=xoxb-...
+   # SLACK_SIGNING_SECRET=...
+   # TASKFLOW_API_BASE_URL=http://127.0.0.1:8000
+   # TASKFLOW_API_TOKEN=secret
+   # DAILY_USER_IDS=UXXXXXXXX,UYYYYYYYY
+   # USER_MAP_JSON={"UXXXXXXXX":"masato"}
+   # OPENAI_API_KEY=sk-...
+   # PORT=3000
 
 3) Run TaskFlow API (separately)
 
@@ -50,6 +54,11 @@ Offline mode (no Slack tokens)
   export SLACK_OFFLINE=1
 
 - This disables Slack initialization and scheduling of DM jobs. `/ai/organize` and `/ai/apply` remain usable.
+
+Notes on secrets
+
+- `.env` loading is automatic from project root and `slack_bot/.env`.
+- `.gitignore` excludes `.env` files to prevent accidental commits.
 
 Rehearsal (no Slack clicks required)
 

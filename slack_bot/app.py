@@ -118,6 +118,76 @@ def ai_apply():  # type: ignore
         return {"error": str(e)}, 500
 
 
+@flask_app.get("/")
+def index():  # type: ignore
+    return {
+        "service": "slack-bot",
+        "health": "ok",
+        "ui": "/ui",
+        "ai_organize": "/ai/organize",
+        "ai_apply": "/ai/apply",
+        "openai_enabled": bool(os.getenv("OPENAI_API_KEY")),
+    }
+
+
+@flask_app.route("/ui", methods=["GET", "POST"])
+def simple_ui():  # type: ignore
+    # Minimal HTML form to test organize with/without OpenAI
+    if request.method == "POST":
+        free_text = request.form.get("free_text", "")
+        today_hours = float(request.form.get("today_hours", "0") or 0)
+        use_tasks = request.form.get("use_tasks") == "on"
+        try:
+            tasks = tf.list_tasks(status="all") if use_tasks else []
+        except Exception:
+            tasks = []
+        payload = {
+            "free_text": free_text,
+            "today_hours": today_hours,
+            "dialog_entries": [],
+            "context": {"tasks": tasks, "checkins_recent": [], "events_recent": []},
+        }
+        try:
+            res = organize(payload)
+        except Exception as e:
+            res = {"error": str(e)}
+        import html, json
+        body = f"""
+        <h2>Organize Result</h2>
+        <p>engine: <b>{html.escape(str(res.get('engine')))}</b> (openai_enabled={bool(os.getenv('OPENAI_API_KEY'))})</p>
+        <pre style='white-space: pre-wrap; background:#f7f7f7; padding:8px;'>{html.escape(json.dumps(res, ensure_ascii=False, indent=2))}</pre>
+        <p><a href='/ui'>← back</a></p>
+        """
+        return f"<html><body>{body}</body></html>"
+    # GET: show form
+    return """
+    <html><body>
+      <h2>AI Organize Tester</h2>
+      <form method="post">
+        <div>
+          <label>Today Hours:</label>
+          <input name="today_hours" type="number" step="0.5" value="3" />
+        </div>
+        <div>
+          <label>Free Text (新規/不可時間など):</label><br/>
+          <textarea name="free_text" rows="8" cols="80">新規: レポート作成
+不可: 13:00-14:00
+昨日: PR #12 完了
+今日: バグ修正 #34</textarea>
+        </div>
+        <div>
+          <label><input type="checkbox" name="use_tasks" checked /> Use current DB tasks</label>
+        </div>
+        <div>
+          <button type="submit">Run organize</button>
+        </div>
+      </form>
+      <hr/>
+      <p>OpenAI enabled: <b>{}</b> (set OPENAI_API_KEY to enable)</p>
+    </body></html>
+    """.format("yes" if os.getenv("OPENAI_API_KEY") else "no")
+
+
 if not SLACK_OFFLINE and handler is not None:
     @flask_app.post("/slack/events")
     def slack_events():  # type: ignore

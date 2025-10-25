@@ -86,6 +86,7 @@ def organize(payload: Dict[str, Any]) -> Dict[str, Any]:
             from .llm_client import organize_with_openai
             res = organize_with_openai(payload)
             res["plan"] = _ensure_sources(res.get("plan") or {})
+            res["engine"] = "openai"
             return res
         except Exception:
             # fall back to heuristic below
@@ -365,6 +366,7 @@ def organize(payload: Dict[str, Any]) -> Dict[str, Any]:
         "mutations": {"add": add, "update": update, "done": done, "defer": defer},
         "dedupe": dedupe,
         "audit": audit,
+        "engine": "heuristic",
     }
 
 

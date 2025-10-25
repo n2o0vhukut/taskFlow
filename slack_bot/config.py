@@ -2,6 +2,17 @@ import os
 import json
 from typing import Dict, List
 
+# Load environment variables from .env files (root and slack_bot/.env) if present
+try:
+    from dotenv import load_dotenv
+    # Root .env
+    load_dotenv()
+    # slack_bot/.env (alongside this file)
+    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+except Exception:
+    # dotenv is optional; ignore if unavailable
+    pass
+
 
 def get_env(name: str, default: str | None = None, required: bool = False) -> str:
     v = os.getenv(name, default)
