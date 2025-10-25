@@ -210,6 +210,9 @@ erDiagram
     - 出力: {applied[], errors[]}
   - TaskFlow（例）
     - GET /tasks?status=all, POST /tasks, PATCH /tasks/{id}
+  - 運用補助
+    - GET / ルート: サービス情報（openai_enabled など）
+    - GET/POST /ui: ブラウザから organize を実行する簡易テスター（OpenAI疎通確認用）
 
 図: シーケンス図（9:00→回答→整理→適用→DM）
 
@@ -286,6 +289,8 @@ flowchart TD
 - 運用監視
   - JSONL監査ログ（data/ai_audit.jsonl）。
   - ヘルスエンドポイント /healthz。
+  - コスト制御: OpenAI費用の上限を `MAX_USD_LIMIT` で管理し、`check_usage_limit.py` を日次実行。
+    - 例: 上限超過時はアプリのOpenAI呼び出しを停止（起動ガードとして先に実行）。
 
 **チェックリスト**
 - 目標値（SLO）と測定手段が対になっている
@@ -337,6 +342,7 @@ flowchart TD
 - 構築
   - 依存: `pip install -r slack_bot/requirements.txt`
   - API: `python -m taskflow api --port 8000`
+  - コストチェック（任意/推奨）: `python check_usage_limit.py`（上限超過なら停止）
   - Bot: `python -m slack_bot.app`（Slackなしは `SLACK_OFFLINE=1`）
 
 - 設定（主要環境変数）
@@ -352,6 +358,15 @@ flowchart TD
 
 - 障害時連絡
   - Slack #ops にアラート（将来拡張）。当面は監査ログ/再送で把握。
+
+図: コスト上限制御フロー（起動ガード）
+
+```mermaid
+flowchart LR
+  A[起動前] --> B[check_usage_limit.py 実行]
+  B -->|上限未超過| C[Bot起動]
+  B -->|上限超過| D[停止/警告ログ]
+```
 
 **チェックリスト**
 - 手順が箇条書きで再現可能
@@ -393,9 +408,11 @@ flowchart TD
   - `.env`（本番はSecret管理）
     - SLACK_BOT_TOKEN=…
     - SLACK_SIGNING_SECRET=…
-    - TASKFLOW_API_BASE_URL=https://…/v1
+    - TASKFLOW_API_BASE_URL=http://127.0.0.1:8000  # ローカル（本番は https://…/v1 など）
     - TASKFLOW_API_TOKEN=…
     - OPENAI_API_KEY=…
+    - OPENAI_MODEL=gpt-4o-mini
+    - MAX_USD_LIMIT=20.0
     - DAILY_USER_IDS=UXXXX,UYYYY
     - JST_HOUR=9, JST_MINUTE=0
 
