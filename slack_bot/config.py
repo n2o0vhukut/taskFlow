@@ -25,10 +25,12 @@ def get_env(name: str, default: str | None = None, required: bool = False) -> st
 class Settings:
     def __init__(self) -> None:
         # Slack
-        self.slack_bot_token: str = get_env("SLACK_BOT_TOKEN", required=True)
-        self.slack_signing_secret: str = get_env("SLACK_SIGNING_SECRET", required=True)
+        # Allow offline mode without Slack creds
+        self.slack_offline: bool = os.getenv("SLACK_OFFLINE", "0").lower() in {"1", "true", "yes"}
+        self.slack_bot_token: str = get_env("SLACK_BOT_TOKEN", required=not self.slack_offline)
+        self.slack_signing_secret: str = get_env("SLACK_SIGNING_SECRET", required=not self.slack_offline)
         # TaskFlow API base URL e.g. https://<ngrok>/v1 or http://localhost:8000/v1
-        self.taskflow_base_url: str = get_env("TASKFLOW_API_BASE_URL", "http://127.0.0.1:8000/v1")
+        self.taskflow_base_url: str = get_env("TASKFLOW_API_BASE_URL", "http://127.0.0.1:8000")
         self.taskflow_token: str = get_env("TASKFLOW_API_TOKEN", required=True)
         # Comma separated Slack user IDs to DM daily
         self.daily_user_ids: List[str] = [u for u in get_env("DAILY_USER_IDS", "").split(",") if u]
