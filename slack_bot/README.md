@@ -48,8 +48,8 @@ Flask + Slack Bolt による最小構成のボットです。毎朝 9:00（JST�
 - プランを生成してDM返信
 - 送信失敗は `slack_bot/spool/` にスプールし、5分毎に再送
 - スラッシュコマンド:
-  - `/plan` 本日のプランを表示
-  - `/tasks` タスクの要約（total/TODO/期限<=48h/今週）
+  - `/plan [hours]` 本日のプランを表示（hours省略時は `DEFAULT_PLAN_HOURS` を使用）
+  - `/tasks` タスク一覧（期限順、先頭20件）と要約
 
 エンドツーエンドセットアップ（Slack連携）
 

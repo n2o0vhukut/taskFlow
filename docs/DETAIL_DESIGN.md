@@ -246,3 +246,49 @@ sequenceDiagram
 8. バリデーションとエラー
 - /ai/organize: today_hoursは数値。必須フィールド欠落は400/422相当。
 - /ai/apply: 未知のmutationはエラー配列に格納しつつ処理継続。
+
+9. Check-in Modal v2（タスク進捗入力 + 新規追加）
+
+目的
+- 現状の自由記述中心の入力から、既存タスクの進捗/状態/期日を直接編集できるUIへ拡張する。同時に新規タスクを追加可能にする。
+
+構成（Block Kit 概要）
+- セクションA: 今日の可処分時間（数値）
+- セクションB: 既存タスク（上位N件）
+  - 表示対象の例: 期限が近い順、doing優先、H優先、最大N=10
+  - 各行: タイトル（表示のみ）/ 状態（todo/doing/done セレクト）/ 期日（plain_text_input YYYY-MM-DD）/ （任意）メモ
+- セクションC: 新規タスク追加（可変個数、最大M=5）
+  - 各行: タイトル（text）/ 期限（text YYYY-MM-DD）/ 優先（H/M/L セレクト）/ 見積（数値）
+- セクションD: 自由記述（任意。抽出/重複統合の補助として維持）
+
+データ化（送信時）
+- `checkin_v2.progress[]`: `{id, status?, due_date?, note?}`… 既存タスクの更新意図
+- `checkin_v2.add[]`: `{title, priority?, estimate_hours?, due_date?}`… 新規追加
+- `today_hours`: 数値
+- `free_text`: 任意
+
+適用フロー
+```mermaid
+sequenceDiagram
+  participant Bolt as slack_bolt.App
+  participant App as slack_bot.app.handle_checkin_modal
+  participant TFc as taskflow_client.TaskFlowClient
+  participant AI as ai_engine.organize
+  participant BK as block_kit.plan_blocks_from_api
+  Note over Bolt,App: モーダル送信（v2）
+  App->>App: checkin_v2.progress を mutations.update/done/defer に変換
+  App->>App: checkin_v2.add を mutations.add に変換
+  alt PREVIEW_ON
+    App-->>Bolt: プレビューDM（件数 + plan + 重複review + overdue確認 + 「適用する」）
+  else PREVIEW_OFF
+    App->>TFc: /tasks CRUD（update/add/done）
+  end
+  App->>AI: organize({today_hours, free_text, tasks})
+  App->>BK: plan_blocks_from_api(plan,tasks)
+  App-->>Bolt: プランDM
+```
+
+備考
+- タスク数が多い場合は上位N件に絞る。N/M は環境変数で調整可能にする。
+- 期日入力は ISO（YYYY-MM-DD）。不正値は無視/警告（プレビューに理由を表示）。
+- 既存の自由記述の抽出（新規/完了/延期）は v2結果とマージし、重複/競合は v2入力を優先。

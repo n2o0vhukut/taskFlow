@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, date, timedelta
+import re
 import uuid
 
 from flask import Flask, request
@@ -499,11 +500,16 @@ if not SLACK_OFFLINE and slack_app is not None:
         try:
             user_id = body.get("user_id")
             tf_user = settings.user_map.get(user_id, user_id)
-            d = date.today()
+            # optional hours arg: "/plan 3" → today_hours=3.0
+            raw_text = (body.get("text") or "").strip()
+            try:
+                hours = float(raw_text) if raw_text else float(settings.default_plan_hours)
+            except Exception:
+                hours = float(settings.default_plan_hours)
             tasks = tf.list_tasks(status="all")
             org = organize({
                 "free_text": "",
-                "today_hours": 0,
+                "today_hours": hours,
                 "dialog_entries": [],
                 "context": {"tasks": tasks, "checkins_recent": [], "events_recent": []},
             })
@@ -606,6 +612,67 @@ if not SLACK_OFFLINE and slack_app is not None:
         except Exception as e:
             logger.error("apply_mutations_now failed: %s", e)
 
+    # ---- DMの通常メッセージにも反応（message.im） ----
+    # Slack App 設定で Event Subscriptions を有効化し、bot events に "message.im" を追加してください。
+    # 併せて Bot Token Scopes に "im:history" を追加し、再インストールが必要です。
+    @slack_app.event("message")
+    def handle_dm_message_events(body, client, logger):  # type: ignore
+        try:
+            ev = body.get("event", {})
+            # DM以外は無視/ボット自身は無視
+            if ev.get("channel_type") != "im" or ev.get("bot_id"):
+                return
+            channel = ev.get("channel")
+            user_id = ev.get("user")
+            text = (ev.get("text") or "").strip()
+            if not channel or not user_id or not text:
+                return
+
+            # ヘルプ
+            if text.lower() in {"help", "ヘルプ", "使い方"}:
+                help_text = (
+                    "使い方:\n"
+                    "• そのまま文章を送る → 内容を踏まえて本日のプランを提案\n"
+                    "• `3h` や `3 時間` を含める → 可処分時間として扱う\n"
+                    "• `/plan 3` でも同様に3時間で計画\n"
+                    "• `/tasks` でタスク一覧（期限順）を表示"
+                )
+                client.chat_postMessage(channel=channel, text=help_text)
+                return
+
+            # 時間抽出（例: 3h, 2.5h, 3 時間）
+            hours = settings.default_plan_hours
+            m = re.search(r"(\d+(?:\.\d+)?)\s*(?:h|時間)", text, re.IGNORECASE)
+            if m:
+                try:
+                    hours = float(m.group(1))
+                except Exception:
+                    pass
+
+            # organize 実行
+            try:
+                tasks = tf.list_tasks(status="all")
+            except Exception:
+                tasks = []
+            payload = {
+                "free_text": text,
+                "today_hours": float(hours or 0),
+                "dialog_entries": [],
+                "context": {"tasks": tasks, "checkins_recent": [], "events_recent": []},
+            }
+            try:
+                org = organize(payload)
+            except Exception as e:
+                logger.error("dm organize failed: %s", e)
+                client.chat_postMessage(channel=channel, text=f"エラー: {e}")
+                return
+
+            over = _build_overdue_blocks(org.get("plan") or {}, tasks, user_id)
+            blocks = plan_blocks_from_api(org.get("plan") or {}, tasks) + over
+            client.chat_postMessage(channel=channel, text="本日のプラン", blocks=blocks)
+        except Exception as e:
+            logger.error("handle_dm_message_events unexpected: %s", e)
+
     @slack_app.action("overdue_done")
     def handle_overdue_done(ack, body, client, logger):  # type: ignore
         ack()
@@ -643,39 +710,37 @@ if not SLACK_OFFLINE and slack_app is not None:
 
     @slack_app.command("/tasks")
     def handle_tasks_summary_cmd(ack, body, client, logger):  # type: ignore
-        """Summarize current TaskFlow tasks: total/TODO/due<=48h/this week."""
+        """List tasks in due-date order with a quick summary."""
         ack()
         try:
             user_id = body.get("user_id")
             tasks = tf.list_tasks(status="all")
             from datetime import date
             today = date.today()
-            total = len(tasks)
-            todo = sum(1 for t in tasks if (t.get("status") or "todo") == "todo")
-            due48 = 0
-            thisweek = 0
-            due48_list = []
-            for t in tasks:
+            # sort by due (None at end), then id
+            def _key(t: dict):
                 dd = t.get("due_date")
-                if not dd:
-                    continue
-                try:
-                    d = date.fromisoformat(dd)
-                except Exception:
-                    continue
-                days = (d - today).days
-                if days <= 2 and (t.get("status") != "done"):
-                    due48 += 1
-                    if len(due48_list) < 5:
-                        due48_list.append(f"• {dd} {t.get('title')}")
-                if 0 <= days <= 7:
-                    thisweek += 1
-            summary = f"Tasks: total {total} / TODO {todo} / 期限<=48h {due48} / 今週 {thisweek}"
-            details = "\n".join(due48_list) if due48_list else "(期限<=48hのタスクはありません)"
+                return (dd is None, dd or "9999-12-31", int(t.get("id") or 0))
+            tasks_sorted = sorted(tasks, key=_key)
+            total = len(tasks_sorted)
+            todo = sum(1 for t in tasks_sorted if (t.get("status") or "todo") == "todo")
+            header = f"タスク一覧（期限順）: 総数 {total} / TODO {todo}"
+            lines = []
+            for i, t in enumerate(tasks_sorted[:20], start=1):
+                due = t.get("due_date") or "-"
+                pri = t.get("priority") or "-"
+                st = t.get("status") or "-"
+                title = t.get("title") or "(無題)"
+                lines.append(f"{i}. [{pri}/{st}] {title} （期限: {due}）")
+            text = "\n".join(lines) if lines else "（タスクがありません）"
+            blocks = [
+                {"type": "section", "text": {"type": "mrkdwn", "text": f"*{header}*"}},
+                {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+            ]
+            if total > 20:
+                blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"他 {total-20} 件。必要ならダッシュボードをご確認ください。"}]})
             ch = client.conversations_open(users=user_id)["channel"]["id"]
-            client.chat_postMessage(channel=ch, text=summary, blocks=[
-                {"type": "section", "text": {"type": "mrkdwn", "text": f"*{summary}*\n{details}"}}
-            ])
+            client.chat_postMessage(channel=ch, text="タスク一覧（期限順）", blocks=blocks)
         except Exception as e:
             logger.error("/tasks failed: %s", e)
 
