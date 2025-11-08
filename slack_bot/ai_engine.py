@@ -252,13 +252,13 @@ def organize(payload: Dict[str, Any]) -> Dict[str, Any]:
             dd = date.fromisoformat(t.due_date)
             if (dd - date.today()).days <= 2:
                 adj += 2.0
-                reasons.append({"source": "llm", "reason_summary": "Due <=48h, urgency boost +2"})
+                reasons.append({"source": "rule", "reason_summary": "期限まで48時間以内のため優先度を加点(+2)"})
         if re.search(r"part|続き|follow[- ]?up|review", t.title, re.I):
             adj += 0.5
-            reasons.append({"source": "llm", "reason_summary": "Continuity value +0.5"})
+            reasons.append({"source": "rule", "reason_summary": "継続作業の価値(+0.5)"})
         if re.search(r"blocked|依存|待ち", t.title, re.I):
             adj -= 1.0
-            reasons.append({"source": "llm", "reason_summary": "Likely blocked -1"})
+            reasons.append({"source": "rule", "reason_summary": "ブロッカーの可能性(-1)"})
         adj = max(-2.0, min(2.0, adj))
         score = base + adj
         scoring.append({
@@ -345,8 +345,8 @@ def organize(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "priority": getattr(tmeta, "priority", "M"),
                 "due_date": getattr(tmeta, "due_date", None),
                 "score": sc.get("S_total"),
-                "source": "llm",
-                "reason_summary": "Ranked by score and placed avoiding busy times",
+                "source": "engine",
+                "reason_summary": "優先度スコアに基づき、不可時間を避けて配置",
             })
             total_hours += est
             cur = end
@@ -357,7 +357,7 @@ def organize(payload: Dict[str, Any]) -> Dict[str, Any]:
                 last_task = sc["task_id"]
 
     if limit is not None and total_hours > limit + 1e-6:
-        alerts.append({"code": "OVERLOAD", "message": f"Planned {total_hours:.1f}h exceeds {limit:.1f}h", "source": "rule", "reason_summary": "+15% guardrail"})
+        alerts.append({"code": "OVERLOAD", "message": f"計画時間 {total_hours:.1f}h が上限 {limit:.1f}h を超えています", "source": "rule", "reason_summary": "+15% ガードレール"})
 
     # deadline risk alerts
     risky = []
@@ -373,9 +373,9 @@ def organize(payload: Dict[str, Any]) -> Dict[str, Any]:
             if not any(b.get("task_id") == t.id for b in blocks):
                 alerts.append({
                     "code": "DEADLINE_RISK",
-                    "message": f"Task #{t.id or '-'} due within 48h not scheduled: {t.title}",
+                    "message": f"期限48時間以内のタスクが未計画: {t.title}",
                     "source": "rule",
-                    "reason_summary": "48h rule",
+                    "reason_summary": "48時間ルール",
                 })
                 risky.append(t.title)
 

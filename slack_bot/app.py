@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import uuid
 
 from flask import Flask, request
@@ -49,6 +49,100 @@ spool = Spooler(settings.spool_dir)
 _PENDING_MUTATIONS: dict[str, dict] = {}
 # In-memory store for dedupe decisions pending confirmation
 _PENDING_DEDUPE: dict[str, dict] = {}
+# In-memory store and helpers for overdue follow-ups
+_OVERDUE_PROMPTS: dict[str, dict] = {}
+
+
+def _parse_hhmm(s: str | None) -> tuple[int, int] | None:
+    if not s:
+        return None
+    try:
+        if "T" in s and len(s) >= 16:
+            hh, mm = s.split("T", 1)[1][:5].split(":")
+            return int(hh), int(mm)
+        if ":" in s:
+            hh, mm = s[:5].split(":")
+            return int(hh), int(mm)
+    except Exception:
+        return None
+    return None
+
+
+def _build_overdue_blocks(plan: dict, tasks: list[dict] | None, user_id: str | None) -> list[dict]:
+    try:
+        items = list((plan or {}).get("blocks") or [])  # type: ignore[union-attr]
+    except Exception:
+        items = []
+    task_ids = {int(t["id"]) for t in (tasks or []) if isinstance(t.get("id"), int)}
+    now = datetime.now()
+    now_minutes = now.hour * 60 + now.minute
+    out: list[dict] = []
+    added = 0
+    for it in items:
+        tid = it.get("task_id")
+        if not isinstance(tid, int) or (tasks is not None and tid not in task_ids):
+            continue
+        start = _parse_hhmm(str(it.get("start")) if it.get("start") is not None else None)
+        if not start:
+            continue
+        if start[0] * 60 + start[1] >= now_minutes:
+            continue
+        token = uuid.uuid4().hex
+        _OVERDUE_PROMPTS[token] = {"task_id": tid, "title": it.get("title"), "start": it.get("start"), "user_id": user_id}
+        if added == 0:
+            out.append({"type": "section", "text": {"type": "mrkdwn", "text": "*開始時刻を過ぎているタスクの確認*"}})
+        out.append({"type": "section", "text": {"type": "mrkdwn", "text": f"• {it.get('title')}（開始：{it.get('start')}）\n状況を教えてください。"}})
+        out.append({
+            "type": "actions",
+            "elements": [
+                {"type": "button", "text": {"type": "plain_text", "text": "完了した"}, "style": "primary", "action_id": "overdue_done", "value": token},
+                {"type": "button", "text": {"type": "plain_text", "text": "リスケする"}, "action_id": "overdue_reschedule", "value": token},
+            ],
+        })
+        added += 1
+        if added >= 3:
+            break
+    # Due-date overdue checks
+    try:
+        all_tasks = list(tasks or [])
+    except Exception:
+        all_tasks = []
+    if all_tasks:
+        from datetime import date as _date
+        today = _date.today()
+        due_added = 0
+        for t in all_tasks:
+            try:
+                tid = int(t.get("id")) if t.get("id") is not None else None
+                status = str(t.get("status") or "")
+                due = t.get("due_date")
+            except Exception:
+                continue
+            if not tid or status == "done" or not due:
+                continue
+            try:
+                d = _date.fromisoformat(str(due))
+            except Exception:
+                continue
+            if d >= today:
+                continue
+            token = uuid.uuid4().hex
+            _OVERDUE_PROMPTS[token] = {"task_id": tid, "title": t.get("title"), "due": due, "user_id": user_id}
+            if due_added == 0:
+                out.append({"type": "section", "text": {"type": "mrkdwn", "text": "*期限切れタスクの確認*"}})
+            out.append({"type": "section", "text": {"type": "mrkdwn", "text": f"• {t.get('title')}（期限：{due}）\n状況を教えてください。"}})
+            out.append({
+                "type": "actions",
+                "elements": [
+                    {"type": "button", "text": {"type": "plain_text", "text": "完了した"}, "style": "primary", "action_id": "overdue_done", "value": token},
+                    {"type": "button", "text": {"type": "plain_text", "text": "リスケする"}, "action_id": "overdue_reschedule", "value": token},
+                ],
+            })
+            due_added += 1
+            if due_added >= 3:
+                break
+
+    return out
 
 
 @flask_app.get("/healthz")
@@ -84,7 +178,12 @@ def admin_trigger():  # type: ignore
                 return {"error": "slack_offline"}, 400
             tf_user = settings.user_map.get(user, user)
             plan = tf.get_plan(tf_user, date.today())
-            blocks = plan_blocks_from_api(plan)
+            try:
+                tasks = tf.list_tasks(status="all")
+            except Exception:
+                tasks = []
+            over = _build_overdue_blocks(plan or {}, tasks, user)
+            blocks = plan_blocks_from_api(plan, tasks) + over
             ch = slack_app.client.conversations_open(users=user)["channel"]["id"]
             slack_app.client.chat_postMessage(channel=ch, text="Plan", blocks=blocks)
             return {"status": "plan_sent"}
@@ -312,7 +411,8 @@ if not SLACK_OFFLINE and slack_app is not None:
                 )
 
             # Render plan
-            blocks = plan_blocks_from_api(org.get("plan") or {})
+            plan_only_blocks = plan_blocks_from_api(org.get("plan") or {}, tasks)
+            overdue_blocks = _build_overdue_blocks(org.get("plan") or {}, tasks, user_id)
 
             # Dry-Run -> show preview with Apply button if enabled
             if settings.preview_before_apply:
@@ -361,7 +461,7 @@ if not SLACK_OFFLINE and slack_app is not None:
                         }
                     ],
                 }]
-                blocks = preview + blocks + actions
+                blocks = preview + plan_only_blocks + overdue_blocks + actions
             else:
                 # Apply mutations to TaskFlow immediately (legacy behavior)
                 def _apply(kind: str, item: dict):
@@ -378,6 +478,7 @@ if not SLACK_OFFLINE and slack_app is not None:
                     apply_mutations(mutations=org.get("mutations") or {}, apply_fn=_apply, reason="slack check-in apply")
                 except Exception as e:
                     log.error("apply mutations failed: %s", e)
+                blocks = plan_only_blocks + overdue_blocks
 
             # DM the user
             try:
@@ -406,7 +507,8 @@ if not SLACK_OFFLINE and slack_app is not None:
                 "dialog_entries": [],
                 "context": {"tasks": tasks, "checkins_recent": [], "events_recent": []},
             })
-            blocks = plan_blocks_from_api(org.get("plan") or {})
+            over = _build_overdue_blocks(org.get("plan") or {}, tasks, user_id)
+            blocks = plan_blocks_from_api(org.get("plan") or {}, tasks) + over
             ch = client.conversations_open(users=user_id)["channel"]["id"]
             client.chat_postMessage(channel=ch, text="本日のプラン", blocks=blocks)
         except Exception as e:
@@ -504,6 +606,41 @@ if not SLACK_OFFLINE and slack_app is not None:
         except Exception as e:
             logger.error("apply_mutations_now failed: %s", e)
 
+    @slack_app.action("overdue_done")
+    def handle_overdue_done(ack, body, client, logger):  # type: ignore
+        ack()
+        try:
+            token = body.get("actions", [{}])[0].get("value")
+            user_id = body.get("user", {}).get("id")
+            entry = _OVERDUE_PROMPTS.pop(token, None)
+            if not entry:
+                return
+            tid = int(entry.get("task_id"))
+            tf.mark_done(tid)
+            if user_id:
+                ch = client.conversations_open(users=user_id)["channel"]["id"]
+                client.chat_postMessage(channel=ch, text=f"✅ 完了として反映しました: #{tid} {entry.get('title')}")
+        except Exception as e:
+            logger.error("overdue_done failed: %s", e)
+
+    @slack_app.action("overdue_reschedule")
+    def handle_overdue_reschedule(ack, body, client, logger):  # type: ignore
+        ack()
+        try:
+            token = body.get("actions", [{}])[0].get("value")
+            user_id = body.get("user", {}).get("id")
+            entry = _OVERDUE_PROMPTS.pop(token, None)
+            if not entry:
+                return
+            tid = int(entry.get("task_id"))
+            new_due = (date.today() + timedelta(days=1)).isoformat()
+            tf.update_task(tid, due_date=new_due)
+            if user_id:
+                ch = client.conversations_open(users=user_id)["channel"]["id"]
+                client.chat_postMessage(channel=ch, text=f"⏭️ リスケしました: #{tid} {entry.get('title')} → 期日 {new_due}")
+        except Exception as e:
+            logger.error("overdue_reschedule failed: %s", e)
+
     @slack_app.command("/tasks")
     def handle_tasks_summary_cmd(ack, body, client, logger):  # type: ignore
         """Summarize current TaskFlow tasks: total/TODO/due<=48h/this week."""
@@ -592,7 +729,12 @@ def _start_scheduler():
                         "today_hours": 0,
                         "dialog_entries": [],
                         "context": {"tasks": tf.list_tasks(status="all"), "checkins_recent": [], "events_recent": []}
-                    }).get("plan") or {}),
+                    }).get("plan") or {}, tf.list_tasks(status="all")) + _build_overdue_blocks(organize({
+                        "free_text": "",
+                        "today_hours": 0,
+                        "dialog_entries": [],
+                        "context": {"tasks": tf.list_tasks(status="all"), "checkins_recent": [], "events_recent": []}
+                    }).get("plan") or {}, tf.list_tasks(status="all"), uid),
                 ) for uid in settings.daily_user_ids
             ],
             trigger=CronTrigger(hour=settings.jst_hour + 1, minute=0),

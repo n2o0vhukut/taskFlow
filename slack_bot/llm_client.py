@@ -31,7 +31,8 @@ SYSTEM_PROMPT = (
     "- audit.scoring: list of items with S_base, S_adj(±2), S_total and reasons[{source,reason_summary}]\n"
     "Guardrails: do not exceed today_hours+15%; blocks are 0.5-2.0h; at most two consecutive blocks for same task;"
     " include DEADLINE_RISK alerts with explanation when tasks due in 48h are not scheduled; include OVERLOAD alert if exceeded;"
-    " every block and alert MUST include source and reason_summary."
+    " every block and alert MUST include source and reason_summary.\n"
+    "Important: Use Japanese for all human‑facing texts (titles, messages, reasons, alerts, advice)."
 )
 
 
@@ -84,4 +85,3 @@ def organize_with_openai(payload: Dict[str, Any]) -> Dict[str, Any]:
         log.error("OpenAI organize failed: %s", e)
         _writelog({"source": "openai", "reason_summary": f"error {e}"})
         raise
-
