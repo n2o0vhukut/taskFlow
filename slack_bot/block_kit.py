@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List
+import os
 
 
 def checkin_prompt_blocks() -> List[Dict[str, Any]]:
@@ -98,16 +99,54 @@ def plan_blocks_from_api(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
     # AI plan with blocks/alerts/advice
     if isinstance(plan, dict) and "blocks" in plan:
+        total_hours = plan.get("total_hours")
+        block_list = plan.get("blocks") or []
+        alerts_list = plan.get("alerts") or []
+        # Summary line
+        try:
+            summary = f"合計 {float(total_hours):.1f}h / ブロック {len(block_list)} 件 / 警告 {len(alerts_list)} 件"
+        except Exception:
+            summary = f"ブロック {len(block_list)} 件 / 警告 {len(alerts_list)} 件"
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": summary}]})
+
         if plan.get("alerts"):
             alert_text = "\n".join(f"• [{a.get('code')}] {a.get('message')}" for a in plan.get("alerts", []))
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*アラート*\n{alert_text}"}})
         # Render schedule blocks
-        for b in plan.get("blocks", []):
+        for idx, b in enumerate(block_list, start=1):
             t = b.get("title") or "(no title)"
             start_end = f"{b.get('start','')}-{b.get('end','')}" if b.get("start") else f"{b.get('hours','')}h"
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"• {start_end} {t}"}})
+            # badges: priority, due, hours, score
+            pri = b.get("priority") or "?"
+            due = b.get("due_date") or "-"
+            hrs = b.get("hours")
+            sc = b.get("score")
+            meta = f"P:{pri} / {hrs}h / due:{due}" + (f" / S:{sc}" if sc is not None else "")
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"{idx}. {start_end} {t}\n_{meta}_"},
+            })
+            if b.get("reason_summary"):
+                blocks.append({
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": f"理由: {b['reason_summary']}"}],
+                })
         if plan.get("advice"):
             blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"_アドバイス_: {plan['advice']}"}]})
+        # Optional: external dashboard link button
+        dash_url = os.getenv("DASHBOARD_URL")
+        if dash_url:
+            blocks.append({
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "詳細を見る"},
+                        "url": dash_url,
+                        "action_id": "open_dashboard",
+                    }
+                ],
+            })
         return blocks
     # Flexible rendering: support text, items, or tasks fallback
     if isinstance(plan, dict) and "text" in plan:

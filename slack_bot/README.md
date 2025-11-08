@@ -46,6 +46,15 @@ Notes
 - Modal collects yesterday/today/blockers and pushes to TaskFlow /checkins
 - On success fetches /plan and posts it back in DM
 - Failed TaskFlow submissions are spooled to slack_bot/spool/ and retried every 5 minutes
+- Slash commands:
+  - `/plan` shows today's plan
+  - `/tasks` shows a quick summary (total/TODO/due<=48h/this week)
+
+Plan message (improved)
+
+- Shows summary: total hours, block count, alert count
+- Each item displays start-end, title, priority/due/hours/score, and a brief reason
+- Optional "View details" button appears when `DASHBOARD_URL` is set (see below)
 
 Offline mode (no Slack tokens)
 
@@ -99,3 +108,13 @@ Use OpenAI (optional)
   # export OPENAI_BASE_URL=https://your-endpoint/v1
 
 - With these set, the bot will call OpenAI during organize. On failure it falls back to heuristic engine.
+
+Dashboard link (optional)
+
+- To show a "View details" button in plan DMs, set a public URL for your dashboard:
+
+  export DASHBOARD_URL=http://127.0.0.1:8501
+
+- You can run the provided Streamlit dashboard locally:
+
+  streamlit run app/dashboard.py

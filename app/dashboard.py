@@ -49,18 +49,39 @@ def load():
 
 tasks, events, checkins = load()
 
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.metric("タスク総数", len(tasks))
 c2.metric("TODO", int((tasks["status"] == "todo").sum()) if not tasks.empty else 0)
 c3.metric("完了", int((tasks["status"] == "done").sum()) if not tasks.empty else 0)
 c4.metric("チェックイン日数", checkins["date"].nunique() if not checkins.empty else 0)
+
+# 期限関連メトリクス（簡易）
+due48 = 0
+due_week = 0
+if not tasks.empty and "due_date" in tasks.columns:
+    try:
+        td = pd.to_datetime(tasks["due_date"], errors="coerce").dt.date
+        today = pd.Timestamp.today().date()
+        delta = (td - today).astype("timedelta64[D]")
+        due48 = int(((delta <= 2) & (tasks["status"] != "done") & (~td.isna())).sum())
+        due_week = int(((delta >= 0) & (delta <= 7) & (~td.isna())).sum())
+    except Exception:
+        pass
+c5.metric("期限<=48h", due48)
+c6.metric("今週期限", due_week)
 
 tab1, tab2, tab3 = st.tabs(["タスク一覧", "イベント履歴", "チェックイン"])
 with tab1:
     if tasks.empty:
         st.info("まだタスクがありません。`python -m taskflow add ...` を実行してください。")
     else:
-        st.dataframe(tasks, use_container_width=True, hide_index=True)
+        # 期日順で表示（期日なしは末尾）
+        df = tasks.copy()
+        if "due_date" in df.columns:
+            df["_due_sort"] = pd.to_datetime(df["due_date"], errors="coerce")
+            df = df.sort_values(["_due_sort", "id"], ascending=[True, True])
+            df = df.drop(columns=["_due_sort"])
+        st.dataframe(df, use_container_width=True, hide_index=True)
         st.download_button(
             "Download tasks.csv", tasks.to_csv(index=False).encode("utf-8"), "tasks.csv"
         )

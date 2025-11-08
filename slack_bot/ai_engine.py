@@ -265,6 +265,13 @@ def organize(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     consec = 0
     last_task = None
+    # Helper to get candidate task by id
+    def _get_task(task_id: Optional[int]) -> Optional[TaskLike]:
+        for _t in candidates:
+            if _t.id == task_id:
+                return _t
+        return None
+
     for sc in scoring:
         if limit is not None and total_hours >= limit:
             break
@@ -303,12 +310,16 @@ def organize(payload: Dict[str, Any]) -> Dict[str, Any]:
                     break
         if moved or end <= time(23, 59):
             # accept block
+            tmeta = _get_task(sc["task_id"]) or TaskLike(id=sc["task_id"], title=sc["title"])
             blocks.append({
                 "title": sc["title"],
                 "task_id": sc["task_id"],
                 "start": start.strftime("%H:%M"),
                 "end": end.strftime("%H:%M"),
                 "hours": round(est, 2),
+                "priority": getattr(tmeta, "priority", "M"),
+                "due_date": getattr(tmeta, "due_date", None),
+                "score": sc.get("S_total"),
                 "source": "llm",
                 "reason_summary": "Ranked by score and placed avoiding busy times",
             })

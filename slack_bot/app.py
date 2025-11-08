@@ -350,6 +350,44 @@ if not SLACK_OFFLINE and slack_app is not None:
         except Exception as e:
             logger.error("/plan failed: %s", e)
 
+    @slack_app.command("/tasks")
+    def handle_tasks_summary_cmd(ack, body, client, logger):  # type: ignore
+        """Summarize current TaskFlow tasks: total/TODO/due<=48h/this week."""
+        ack()
+        try:
+            user_id = body.get("user_id")
+            tasks = tf.list_tasks(status="all")
+            from datetime import date
+            today = date.today()
+            total = len(tasks)
+            todo = sum(1 for t in tasks if (t.get("status") or "todo") == "todo")
+            due48 = 0
+            thisweek = 0
+            due48_list = []
+            for t in tasks:
+                dd = t.get("due_date")
+                if not dd:
+                    continue
+                try:
+                    d = date.fromisoformat(dd)
+                except Exception:
+                    continue
+                days = (d - today).days
+                if days <= 2 and (t.get("status") != "done"):
+                    due48 += 1
+                    if len(due48_list) < 5:
+                        due48_list.append(f"• {dd} {t.get('title')}")
+                if 0 <= days <= 7:
+                    thisweek += 1
+            summary = f"Tasks: total {total} / TODO {todo} / 期限<=48h {due48} / 今週 {thisweek}"
+            details = "\n".join(due48_list) if due48_list else "(期限<=48hのタスクはありません)"
+            ch = client.conversations_open(users=user_id)["channel"]["id"]
+            client.chat_postMessage(channel=ch, text=summary, blocks=[
+                {"type": "section", "text": {"type": "mrkdwn", "text": f"*{summary}*\n{details}"}}
+            ])
+        except Exception as e:
+            logger.error("/tasks failed: %s", e)
+
 
 def send_daily_prompt(client, user_id: str) -> None:
     try:
