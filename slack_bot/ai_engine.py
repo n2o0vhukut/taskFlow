@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import unicodedata as _ud
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, time
 from pathlib import Path
@@ -22,7 +23,18 @@ def _writelog(record: Dict[str, Any]) -> None:
 
 
 def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^\w\s一-龥ぁ-んァ-ヶー・】）)\-]", " ", s.lower())).strip()
+    """Normalize text for similarity:
+    - NFKC（全角/半角の揺れを正規化）
+    - 小文字化
+    - 句読点/記号を除去（Unicodeカテゴリ=P/Sの多く）
+    - 連続空白を1つに
+    """
+    s = _ud.normalize("NFKC", s or "")
+    s = s.lower()
+    # remove most punct/symbols while keeping word chars and CJK (approximation)
+    s = re.sub(r"[\-_,.;:!\?\(\)\[\]{}\|/\\@#\$%\^\*&`~'\"]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 
 def _tokens(s: str) -> set[str]:
@@ -158,10 +170,23 @@ def organize(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "matched_task_id": best[1].id,
                 "similarity": round(best[0], 2),
                 "decision": "merge",
+                "matched_title": best[1].title,
+                "candidate_title": title,
             })
             # optional: update title to a normalized one if longer
             if len(title) > len(best[1].title):
                 update.append({"id": best[1].id, "title": title})
+        elif best[0] >= 0.7 and best[1] is not None:
+            # ambiguous band → ask user later
+            dedupe.append({
+                "source": f"dialog:{title}",
+                "matched_task_id": best[1].id,
+                "similarity": round(best[0], 2),
+                "decision": "review",
+                "matched_title": best[1].title,
+                "candidate_title": title,
+            })
+            # do not auto-add
         else:
             add.append({"title": title, "priority": "M"})
 

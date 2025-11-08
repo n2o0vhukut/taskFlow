@@ -50,11 +50,26 @@ Notes
   - `/plan` shows today's plan
   - `/tasks` shows a quick summary (total/TODO/due<=48h/this week)
 
+Dry‑Run → Apply (preview then apply)
+
+- By default (`PREVIEW_BEFORE_APPLY=1`), the bot sends a preview after check-in:
+  - Shows mutation counts (add/update/done/defer) and the day plan
+  - Includes a "適用する" button; clicking applies mutations and replies with a summary
+- Disable preview and apply immediately by setting:
+
+  export PREVIEW_BEFORE_APPLY=0
+
 Plan message (improved)
 
 - Shows summary: total hours, block count, alert count
 - Each item displays start-end, title, priority/due/hours/score, and a brief reason
 - Optional "View details" button appears when `DASHBOARD_URL` is set (see below)
+
+Duplicate handling (review band)
+
+- Titles similar to existing tasks are automatically merged when similarity ≥ 0.8.
+- For 0.7–0.8, the bot asks for confirmation in the preview DM:
+  - Buttons: 「統合する」(rename existing) / 「別タスク」(keep as new; queued for apply)
 
 Offline mode (no Slack tokens)
 

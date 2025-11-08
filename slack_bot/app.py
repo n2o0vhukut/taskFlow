@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, date
+import uuid
 
 from flask import Flask, request
 from slack_sdk.errors import SlackApiError
@@ -43,6 +44,11 @@ if not SLACK_OFFLINE:
 # Clients
 tf = TaskFlowClient(base_url=settings.taskflow_base_url, token=settings.taskflow_token)
 spool = Spooler(settings.spool_dir)
+
+# In-memory store for pending mutations (Dry-Run -> Apply)
+_PENDING_MUTATIONS: dict[str, dict] = {}
+# In-memory store for dedupe decisions pending confirmation
+_PENDING_DEDUPE: dict[str, dict] = {}
 
 
 @flask_app.get("/healthz")
@@ -297,25 +303,81 @@ if not SLACK_OFFLINE and slack_app is not None:
                 log.error("organize failed: %s", e)
                 org = {"plan": {"blocks": [], "alerts": [{"code": "ENGINE_ERROR", "message": str(e), "source": "engine", "reason_summary": "organize failure"}], "advice": ""}, "mutations": {"add": [], "update": [], "done": [], "defer": []}}
 
-            # Apply mutations to TaskFlow (idempotent-ish per engine design)
-            def _apply(kind: str, item: dict):
-                if kind == "add":
-                    return tf.add_task(**{k: v for k, v in item.items() if k in {"title", "project", "priority", "estimate_hours", "due_date"}})
-                if kind == "update":
-                    return tf.update_task(int(item["id"]), **{k: v for k, v in item.items() if k != "id"})
-                if kind == "done":
-                    return tf.mark_done(int(item["id"]))
-                if kind == "defer":
-                    return tf.update_task(int(item["id"]), due_date=item.get("due_date"))
-                raise ValueError(f"unknown mutation kind: {kind}")
-
-            try:
-                apply_mutations(mutations=org.get("mutations") or {}, apply_fn=_apply, reason="slack check-in apply")
-            except Exception as e:
-                log.error("apply mutations failed: %s", e)
+            def _mut_counts(muts: dict) -> tuple[int, int, int, int]:
+                return (
+                    len(muts.get("add") or []),
+                    len(muts.get("update") or []),
+                    len(muts.get("done") or []),
+                    len(muts.get("defer") or []),
+                )
 
             # Render plan
             blocks = plan_blocks_from_api(org.get("plan") or {})
+
+            # Dry-Run -> show preview with Apply button if enabled
+            if settings.preview_before_apply:
+                muts = org.get("mutations") or {"add": [], "update": [], "done": [], "defer": []}
+                a, u, d, f = _mut_counts(muts)
+                token = uuid.uuid4().hex
+                _PENDING_MUTATIONS[token] = {
+                    "mutations": muts,
+                    "reason": "slack check-in apply",
+                    "user_id": user_id,
+                }
+                preview = [
+                    {"type": "section", "text": {"type": "mrkdwn", "text": f"*適用予定の変更*  add {a} / update {u} / done {d} / defer {f}"}},
+                ]
+                # Ambiguous dedupe confirmations (0.7–0.8)
+                reviews = [x for x in (org.get("dedupe") or []) if x.get("decision") == "review"]
+                if reviews:
+                    preview.append({"type": "section", "text": {"type": "mrkdwn", "text": "*重複の可能性*（確認してください）"}})
+                    for r in reviews[:5]:
+                        dtoken = uuid.uuid4().hex
+                        _PENDING_DEDUPE[dtoken] = {
+                            "pending_token": token,
+                            "matched_task_id": r.get("matched_task_id"),
+                            "matched_title": r.get("matched_title"),
+                            "candidate_title": r.get("candidate_title"),
+                            "similarity": r.get("similarity"),
+                            "user_id": user_id,
+                        }
+                        text = f"'{r.get('candidate_title')}' ≈ 既存 #{r.get('matched_task_id')} '{r.get('matched_title')}' (sim {r.get('similarity')})"
+                        preview.extend([
+                            {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+                            {"type": "actions", "elements": [
+                                {"type": "button", "text": {"type": "plain_text", "text": "統合する"}, "style": "primary", "action_id": "dedupe_merge", "value": dtoken},
+                                {"type": "button", "text": {"type": "plain_text", "text": "別タスク"}, "action_id": "dedupe_new", "value": dtoken},
+                            ]},
+                        ])
+                actions = [{
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "適用する"},
+                            "style": "primary",
+                            "action_id": "apply_mutations_now",
+                            "value": token,
+                        }
+                    ],
+                }]
+                blocks = preview + blocks + actions
+            else:
+                # Apply mutations to TaskFlow immediately (legacy behavior)
+                def _apply(kind: str, item: dict):
+                    if kind == "add":
+                        return tf.add_task(**{k: v for k, v in item.items() if k in {"title", "project", "priority", "estimate_hours", "due_date"}})
+                    if kind == "update":
+                        return tf.update_task(int(item["id"]), **{k: v for k, v in item.items() if k != "id"})
+                    if kind == "done":
+                        return tf.mark_done(int(item["id"]))
+                    if kind == "defer":
+                        return tf.update_task(int(item["id"]), due_date=item.get("due_date"))
+                    raise ValueError(f"unknown mutation kind: {kind}")
+                try:
+                    apply_mutations(mutations=org.get("mutations") or {}, apply_fn=_apply, reason="slack check-in apply")
+                except Exception as e:
+                    log.error("apply mutations failed: %s", e)
 
             # DM the user
             try:
@@ -349,6 +411,98 @@ if not SLACK_OFFLINE and slack_app is not None:
             client.chat_postMessage(channel=ch, text="本日のプラン", blocks=blocks)
         except Exception as e:
             logger.error("/plan failed: %s", e)
+
+    @slack_app.action("dedupe_merge")
+    def handle_dedupe_merge(ack, body, client, logger):  # type: ignore
+        ack()
+        try:
+            token = body.get("actions", [{}])[0].get("value")
+            user_id = body.get("user", {}).get("id")
+            entry = _PENDING_DEDUPE.pop(token, None)
+            if not entry:
+                if user_id:
+                    ch = client.conversations_open(users=user_id)["channel"]["id"]
+                    client.chat_postMessage(channel=ch, text="対象が見つかりませんでした（期限切れ）。")
+                return
+            tid = int(entry["matched_task_id"]) if entry.get("matched_task_id") is not None else None
+            title = entry.get("candidate_title") or ""
+            if tid is None:
+                raise ValueError("invalid matched_task_id")
+            tf.update_task(tid, title=title)
+            msg = f"重複を統合しました: #{tid} ← '{title}'"
+            if user_id:
+                ch = client.conversations_open(users=user_id)["channel"]["id"]
+                client.chat_postMessage(channel=ch, text=msg)
+        except Exception as e:
+            logger.error("dedupe_merge failed: %s", e)
+
+    @slack_app.action("dedupe_new")
+    def handle_dedupe_new(ack, body, client, logger):  # type: ignore
+        ack()
+        try:
+            token = body.get("actions", [{}])[0].get("value")
+            user_id = body.get("user", {}).get("id")
+            entry = _PENDING_DEDUPE.pop(token, None)
+            if not entry:
+                if user_id:
+                    ch = client.conversations_open(users=user_id)["channel"]["id"]
+                    client.chat_postMessage(channel=ch, text="対象が見つかりませんでした（期限切れ）。")
+                return
+            title = entry.get("candidate_title") or ""
+            # If we had preview token, append to its add list; else add immediately
+            pt = entry.get("pending_token")
+            if pt and pt in _PENDING_MUTATIONS:
+                _PENDING_MUTATIONS[pt].setdefault("mutations", {}).setdefault("add", []).append({"title": title, "priority": "M"})
+                msg = f"別タスクとして扱います（適用時に追加）: '{title}'"
+            else:
+                tf.add_task(title=title, priority="M")
+                msg = f"別タスクとして追加しました: '{title}'"
+            if user_id:
+                ch = client.conversations_open(users=user_id)["channel"]["id"]
+                client.chat_postMessage(channel=ch, text=msg)
+        except Exception as e:
+            logger.error("dedupe_new failed: %s", e)
+
+    @slack_app.action("apply_mutations_now")
+    def handle_apply_mutations_now(ack, body, client, logger):  # type: ignore
+        ack()
+        try:
+            token = body.get("actions", [{}])[0].get("value")
+            user_id = body.get("user", {}).get("id")
+            entry = _PENDING_MUTATIONS.pop(token, None)
+            if not entry:
+                # Nothing pending; inform user
+                if user_id:
+                    ch = client.conversations_open(users=user_id)["channel"]["id"]
+                    client.chat_postMessage(channel=ch, text="適用対象が見つかりませんでした（期限切れ）。もう一度お試しください。")
+                return
+
+            muts = entry.get("mutations") or {}
+            reason = entry.get("reason") or "apply via button"
+
+            def _apply(kind: str, item: dict):
+                if kind == "add":
+                    return tf.add_task(**{k: v for k, v in item.items() if k in {"title", "project", "priority", "estimate_hours", "due_date"}})
+                if kind == "update":
+                    return tf.update_task(int(item["id"]), **{k: v for k, v in item.items() if k != "id"})
+                if kind == "done":
+                    return tf.mark_done(int(item["id"]))
+                if kind == "defer":
+                    return tf.update_task(int(item["id"]), due_date=item.get("due_date"))
+                raise ValueError(f"unknown mutation kind: {kind}")
+
+            res = apply_mutations(mutations=muts, apply_fn=_apply, reason=reason)
+            a = sum(1 for x in res.get("applied", []) if x.get("kind") == "add")
+            u = sum(1 for x in res.get("applied", []) if x.get("kind") == "update")
+            d = sum(1 for x in res.get("applied", []) if x.get("kind") == "done")
+            f = sum(1 for x in res.get("applied", []) if x.get("kind") == "defer")
+            err = len(res.get("errors", []))
+            summary = f"Applied: add {a} / update {u} / done {d} / defer {f} (errors {err})"
+            if user_id:
+                ch = client.conversations_open(users=user_id)["channel"]["id"]
+                client.chat_postMessage(channel=ch, text=summary)
+        except Exception as e:
+            logger.error("apply_mutations_now failed: %s", e)
 
     @slack_app.command("/tasks")
     def handle_tasks_summary_cmd(ack, body, client, logger):  # type: ignore

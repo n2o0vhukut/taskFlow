@@ -51,6 +51,8 @@ class Settings:
         self.log_level: str = get_env("LOG_LEVEL", "INFO")
         # Admin trigger token (optional) for rehearsal endpoints
         self.admin_token: str | None = os.getenv("ADMIN_TOKEN")
+        # Preview plan and mutations before apply (Dry-Run -> Apply button)
+        self.preview_before_apply: bool = os.getenv("PREVIEW_BEFORE_APPLY", "1").lower() in {"1", "true", "yes"}
         # OpenAI
         self.openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
         self.openai_model: str = get_env("OPENAI_MODEL", "gpt-4o-mini")

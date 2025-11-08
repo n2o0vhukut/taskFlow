@@ -7,8 +7,6 @@
   - 含む: Slack DMボット、AI整理エンジン（抽出/重複統合/優先度調整/スケジュール生成）、TaskFlow API連携、監査ログ、再送/リトライ。
   - 含まない: UIポータルの詳細設計、長期ロードマップ、アカウント管理、チーム配賦/コスト管理。
 
-- 読者想定（個人利用者、チームリーダー/マネージャー、運用管理者）
-  - 開発初学者でも流れを理解できるよう、用語は平易に説明。
 
 - 用語集（簡潔）
   - LLM: 大規模言語モデル（例: OpenAI）。自然文を解析し判断・生成するAI。
@@ -204,7 +202,8 @@ erDiagram
 - 代表エンドポイント例
   - POST /ai/organize（Bot内）
     - 入力: {free_text, today_hours, dialog_entries[], context{tasks[], checkins_recent[], events_recent[]}}
-    - 出力: {plan{blocks[], alerts[], advice, total_hours}, mutations{add/update/done/defer}, dedupe[], audit{}}
+    - 出力: {plan{blocks[], alerts[], advice, total_hours}, mutations{add/update/done/defer}, dedupe[{source,matched_task_id,matched_title,candidate_title,similarity,decision}], audit{}}
+      - dedupe.decision: merge（自動統合、類似度≥0.8）/ review（確認帯、0.7–0.8）/ new
   - POST /ai/apply（Bot内）
     - 入力: {mutations, reason}
     - 出力: {applied[], errors[]}
@@ -213,8 +212,11 @@ erDiagram
   - 運用補助
     - GET / ルート: サービス情報（openai_enabled など）
     - GET/POST /ui: ブラウザから organize を実行する簡易テスター（OpenAI疎通確認用）
+  - Slack（Slash/Actions）
+    - Slash: `/plan`（当日プラン表示）, `/tasks`（total/TODO/期限≤48h/今週の要約）
+    - Actions: `apply_mutations_now`（プレビュー差分を適用）, `dedupe_merge`（候補→既存へ統合）, `dedupe_new`（候補を別タスクとして扱う）
 
-図: シーケンス図（9:00→回答→整理→適用→DM）
+図: シーケンス図（9:00→回答→整理→プレビュー→適用→DM）
 
 ```mermaid
 sequenceDiagram
@@ -226,11 +228,13 @@ sequenceDiagram
   User->>Slack: DMボタン→モーダル送信
   Slack->>Bot: /slack/events (view_submission)
   Bot->>AI: POST /ai/organize (回答+DB文脈)
-  AI-->>Bot: plan + mutations + audit
+  AI-->>Bot: plan + mutations + dedupe(review含む)
+  Bot-->>Slack: プレビューDM（件数/plan/レビュー項目 + 適用ボタン）
+  User->>Slack: 「適用する」ボタン
+  Slack->>Bot: action(apply_mutations_now)
   Bot->>TF: /tasks (add/update/done/defer)
   TF-->>Bot: 200 OK
-  Bot-->>Slack: DMでplan（Block Kit）
-  Slack-->>User: 当日プラン表示
+  Bot-->>Slack: 結果サマリDM（Applied件数/エラー）
 ```
 
 **チェックリスト**
@@ -243,8 +247,9 @@ sequenceDiagram
 - 日次フロー
   1) 09:00 JST: DMでチェックイン依頼（ボタン）。
   2) 回答受領→AI整理（抽出/重複/優先度/スケジューリング）。
-  3) mutationsをDBへ適用（冪等、部分成功許容）。
-  4) planをDM送信。alerts/adviceを添える。
+  3) プレビューDMを送る（適用予定の件数＋プラン表示、重複review帯のボタン）。
+  4) ユーザーが「適用する」ボタンを押下→差分を適用→結果サマリをDM返信。
+     - 環境変数 `PREVIEW_BEFORE_APPLY=0` の場合は3)を省略し、直ちに適用してプランDMを返す。
   5) 10:00 JST: 無応答なら自動プランを提示（DB情報のみ）。
   6) 5分毎: スプールドレイン（送信失敗分の再送）。
 
@@ -258,8 +263,10 @@ sequenceDiagram
 flowchart TD
   A[9:00 DM送信] --> B{回答あり?}
   B -- はい --> C[AI整理 organize]
-  C --> D[mutations適用 apply]
-  D --> E[planをDMで返す]
+  C --> P[プレビューDM 送信]
+  P -->|適用する| D[mutations適用 apply]
+  D --> S[結果サマリDM]
+  S --> E[当日プラン表示]
   B -- いいえ --> F[10:00 自動プラン生成]
   F --> E
   D --> G{送信成功?}
@@ -310,7 +317,9 @@ flowchart TD
 - バリデーション
   - 可処分時間は数値。空なら0扱い。テキストは最大数千文字まで。
 - 返信メッセージ
-  - 見出し＋ブロック（時間帯 or 時間数）＋アラート＋アドバイス。
+  - 見出し（本日のプラン）＋サマリ（合計時間/ブロック数/警告数）。
+  - 番号付きブロック（時間帯 or 時間数）＋バッジ（P:優先度/時間/期限/スコア）＋理由（1行）。
+  - アラート＋アドバイス。`DASHBOARD_URL` 設定時は「詳細を見る」ボタンを表示。
 
 **チェックリスト**
 - 必須入力と任意入力の区別がある
@@ -351,6 +360,8 @@ flowchart TD
   - OPENAI_API_KEY, OPENAI_MODEL（任意）
   - DAILY_USER_IDS, USER_MAP_JSON
   - JST_HOUR/JST_MINUTE, PORT, LOG_LEVEL
+  - PREVIEW_BEFORE_APPLY（プレビュー→適用ボタンの有効/無効）
+  - DASHBOARD_URL（プランDMの「詳細を見る」ボタンの遷移先）
 
 - デプロイ/ロールバック
   - プロセス監視（systemd/PM2等）。ログ退避。
@@ -399,6 +410,8 @@ flowchart LR
   - Guardrail: AIの暴走を防ぐ制約（例: 時間超過不可）。
   - JSONL: 1行1JSONのログ形式（監査で利用）。
 
+
+
 - 代表curl例
   - organize: `curl -s http://127.0.0.1:3000/ai/organize -H 'Content-Type: application/json' -d '{"free_text":"新規: 仕様書","today_hours":3,"dialog_entries":[{"text":"昨日: PR #12 完了"}],"context":{"tasks":[]}}'`
   - apply: `curl -s http://127.0.0.1:3000/ai/apply -H 'Content-Type: application/json' -d '{"mutations":{"add":[{"title":"仕様書"}]}}'`
@@ -423,7 +436,7 @@ flowchart LR
 
 --- 
 
-# 15. 現時点の課題と改善方針（メモ）
+# 13. 現時点の課題と改善方針（メモ）
 
 ユーザー検証から見えた課題と、それに対する具体的な改善案を整理します。順次バックログ化して実装します。
 
@@ -506,7 +519,7 @@ flowchart LR
 - 新しいデータ（学習時間等）の保護と可視化方針が決まっている
 
 
-# 16. 改善ロードマップ（優先度と着手順）
+# 14. 改善ロードマップ（優先度と着手順）
 
 Must（直ちに着手）
 - チェックイン入力のDB反映と可視化強化
