@@ -183,9 +183,28 @@ def plan_blocks_from_api(plan: Dict[str, Any], tasks: Optional[List[Dict[str, An
                 return s.split("T", 1)[1][:5]
             m = _re.match(r"^(\d{1,2}:\d{2})", s)
             return m.group(1) if m else s
+        # Fallback map for due_date: plan blockに無い場合は tasks から補完
+        id_to_due: Dict[int, str] = {}
+        title_to_due: Dict[str, str] = {}
+        if tasks:
+            for t in tasks:
+                try:
+                    if isinstance(t.get("id"), int) and t.get("due_date"):
+                        id_to_due[int(t["id"])]= str(t.get("due_date"))
+                    if t.get("title") and t.get("due_date"):
+                        title_to_due[str(t.get("title") or "").strip().lower()] = str(t.get("due_date"))
+                except Exception:
+                    continue
+
         for idx, b in enumerate(block_list, start=1):
             t = b.get("title") or "(無題)"
-            due = _fmt_date(b.get("due_date"))
+            # 補完ロジック: 1) blockのdue_date 2) task_id一致 3) タイトル一致
+            due_val = b.get("due_date")
+            if not due_val and isinstance(b.get("task_id"), int):
+                due_val = id_to_due.get(int(b.get("task_id")))
+            if not due_val and t:
+                due_val = title_to_due.get(str(t).strip().lower())
+            due = _fmt_date(due_val)
             reason = _jp_reason(b.get("reason_summary"))
             lines: List[str] = [f"{idx}. {t}"]
             if show_slots:

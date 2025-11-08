@@ -25,13 +25,13 @@ SYSTEM_PROMPT = (
     "you will normalize inputs, resolve duplicates, reprioritize, and generate a realistic day plan.\n"
     "Return STRICT JSON with the following keys only: plan, mutations, dedupe, audit.\n"
     "Constraints: \n"
-    "- plan: total_hours, blocks(start,end,hours,title,source,reason_summary), alerts(code,message,source,reason_summary), advice\n"
+    "- plan: total_hours, blocks(start,end,hours,title,source,reason_summary, due_date?), alerts(code,message,source,reason_summary), advice\n"
     "- mutations: add[{title,priority,estimate_hours?,due_date?}], update[{id,<fields>}], done[{id}], defer[{id,due_date}]\n"
     "- dedupe: [{source, matched_task_id, similarity, decision}] with decision in ['merge','new']\n"
     "- audit.scoring: list of items with S_base, S_adj(±2), S_total and reasons[{source,reason_summary}]\n"
     "Guardrails: do not exceed today_hours+15%; blocks are 0.5-2.0h; at most two consecutive blocks for same task;"
     " include DEADLINE_RISK alerts with explanation when tasks due in 48h are not scheduled; include OVERLOAD alert if exceeded;"
-    " every block and alert MUST include source and reason_summary.\n"
+    " every block and alert MUST include source and reason_summary. If a task has a known due date in context, include it as due_date in blocks.\n"
     "Important: Use Japanese for all human‑facing texts (titles, messages, reasons, alerts, advice)."
 )
 
