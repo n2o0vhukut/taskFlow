@@ -1,2 +1,16 @@
 .venv/
 venv/
+__pycache__/
+.pytest_cache/
+.DS_Store
+*.pyc
+dist/
+build/
+*.egg-info/
+data/*.db
+data/*.log
+# dotenv files (never commit secrets)
+.env
+*.env
+slack_bot/.env
+grok/

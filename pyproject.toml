@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taskflow"
+version = "0.1.0"
+description = "TaskFlow Ops minimal package with CLI and Flask API"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "Taskflow Ops" }
+]
+dependencies = [
+  "Flask>=3.0.0",
+  "SQLAlchemy>=2.0.0"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
